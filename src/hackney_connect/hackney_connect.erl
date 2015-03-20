@@ -54,8 +54,8 @@ create_connection(Transport, Host, Port, Options) ->
 create_connection(Transport, Host, Port, Options, Dynamic)
         when is_list(Options) ->
     Netloc = case {Transport, Port} of
-                 {hackney_tcp_transport, 80}  -> list_to_binary(Host);
-                 {hackney_ssl_transport, 443} -> list_to_binary(Host);
+                 {hackney_tcp, 80}  -> list_to_binary(Host);
+                 {hackney_ssl, 443} -> list_to_binary(Host);
                  _ ->
                      iolist_to_binary([Host, ":", integer_to_list(Port)])
              end,
@@ -236,7 +236,7 @@ do_connect(Host, Port, Transport, #client{mod_metrics=Mod,
                    end,
 
     ConnectOpts = case Transport of
-                      hackney_ssl_transport ->
+                      hackney_ssl ->
                           ConnectOpts1 ++ ssl_opts(Host, Opts);
                       _ ->
                           ConnectOpts1
