@@ -16,9 +16,6 @@
 %% Supervisor callbacks
 -export([init/1]).
 
-%% Helper macro for declaring children of supervisor
--define(CHILD(I, Type), {I, {I, start_link, []}, permanent, 5000, Type, [I]}).
-
 %% ===================================================================
 %% API functions
 %% ===================================================================
@@ -37,7 +34,16 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
+    SocketsPoolSup = {hackney_sockets_pool_sup,
+                      {hackney_sockets_pool_sup, start_link, []},
+                      permanent, infinity, supervisor, [hackney_sockets_pool_sup]},
 
-    Manager = ?CHILD(hackney_manager, worker),
+    SocketsServer = {hackney_sockets_server,
+                     {hackney_sockets_server, start_link, []},
+                     permanent, 5000, worker, [hackney_sockets_server]},
 
-    {ok, { {one_for_one, 10, 1}, [Manager]}}.
+    Manager = {hackney_manager,
+               {hackney_manager, start_link, []},
+               permanent, 5000, worker, [hackney_manager]},
+
+    {ok, { {one_for_one, 10, 1}, [SocketsPoolSup, SocketsServer, Manager]}}.
