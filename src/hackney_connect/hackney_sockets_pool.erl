@@ -38,12 +38,15 @@ start_pool(PoolName, Opts) ->
 with_pool(PoolName, Fun) ->
     hackney_sockets_server:with_pool(PoolName, Fun).
 
-checkout(PoolName, Transport, Host, Port, Timeout) ->
+checkout(PoolName, Transport, Host, Port, Opts) ->
+    checkout(PoolName, Transport, Host, Port, Opts, infinity).
+
+checkout(PoolName, Transport, Host, Port, Opts, Timeout) ->
     with_pool(PoolName, fun(Pid) ->
-                                checkout1(Pid, Transport, Host, Port, Timeout)
+                                checkout1(Pid, Transport, Host, Port, Opts, Timeout)
                         end).
 
-checkout1(Pid, Transport, Host, Port, Timeout) ->
+checkout1(Pid, Transport, Host, Port, Opts, Timeout) ->
     case inet:getaddrs(Host, inet, Timeout) of
         {ok, IPs} ->
             case gen_server:call(Pid, {checkout, Transport, IPs, Port,
@@ -51,7 +54,7 @@ checkout1(Pid, Transport, Host, Port, Timeout) ->
                 {ok, HS} ->
                     {ok, HS};
                 {error, _} ->
-                    connect(IPs, Port, Transport, [{active, false}], Timeout,
+                    connect(IPs, Port, Transport, [{active, false} | Opts], Timeout,
                             undefined)
             end;
         Error ->
