@@ -76,7 +76,7 @@ checkin1(Pid, PoolName, HS) ->
                             ok;
                         Error ->
                             _ = hackney_sockets_server:decr_active_pool(PoolName),
-                            hackney_sock:close(HS),
+                            hackney_socket:close(HS),
                             Error
                     end;
                 _ ->
