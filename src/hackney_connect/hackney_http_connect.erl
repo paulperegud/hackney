@@ -35,8 +35,8 @@ connect(ProxyHost, ProxyPort, Opts) ->
     connect(ProxyHost, ProxyPort, Opts, infinity).
 
 connect(ProxyHost, ProxyPort, Opts, Timeout)
-        when is_list(ProxyHost), is_integer(ProxyPort),
-        (Timeout =:= infinity orelse is_integer(Timeout)) ->
+  when is_integer(ProxyPort),
+       (Timeout =:= infinity orelse is_integer(Timeout)) ->
 
     %% get the  host and port to connect from the options
     Host = proplists:get_value(connect_host, Opts),

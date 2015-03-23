@@ -23,8 +23,8 @@ messages(_) -> {ssl, ssl_closed, ssl_error}.
 connect(Host, Port, Opts) ->
 	connect(Host, Port, Opts, infinity).
 
-connect(Host, Port, Opts, Timeout) when is_integer(Port),
-	(Timeout =:= infinity orelse is_integer(Timeout)) ->
+connect(Host, Port, Opts, Timeout)
+  when is_integer(Port), (Timeout =:= infinity orelse is_integer(Timeout)) ->
 
     %% filter options
     AcceptedOpts =  [cacertfile, cacerts, cert, certfile, ciphers,
