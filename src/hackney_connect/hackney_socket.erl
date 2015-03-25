@@ -184,6 +184,7 @@ sendfile_fallback1(Fd, HS, SendFun, Bytes, ChunkSize, Sent)
                  Bytes > 0 -> erlang:min(ChunkSize, Bytes - Sent);
                  true -> ChunkSize
              end,
+    %% read the data and send it.
     case file:read(Fd, Length) of
         {ok, Data} ->
             Len = iolist_size(Data),
