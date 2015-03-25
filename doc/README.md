@@ -527,6 +527,10 @@ $ kill `cat httpbin.pid`
 <tr><td><a href="hackney_pool_handler.md" class="module">hackney_pool_handler</a></td></tr>
 <tr><td><a href="hackney_request.md" class="module">hackney_request</a></td></tr>
 <tr><td><a href="hackney_response.md" class="module">hackney_response</a></td></tr>
+<tr><td><a href="hackney_socket.md" class="module">hackney_socket</a></td></tr>
+<tr><td><a href="hackney_sockets_pool.md" class="module">hackney_sockets_pool</a></td></tr>
+<tr><td><a href="hackney_sockets_pool_sup.md" class="module">hackney_sockets_pool_sup</a></td></tr>
+<tr><td><a href="hackney_sockets_server.md" class="module">hackney_sockets_server</a></td></tr>
 <tr><td><a href="hackney_socks5.md" class="module">hackney_socks5</a></td></tr>
 <tr><td><a href="hackney_ssl.md" class="module">hackney_ssl</a></td></tr>
 <tr><td><a href="hackney_stream.md" class="module">hackney_stream</a></td></tr>
