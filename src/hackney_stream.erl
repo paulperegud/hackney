@@ -1,375 +1,159 @@
-%%% -*- erlang -*-
-%%%
-%%% This file is part of hackney released under the Apache 2 license.
-%%% See the NOTICE for more information.
-%%%
-
 -module(hackney_stream).
 
--export([start_link/3]).
 
-%% internal
--export([async_recv/5, maybe_continue/4]).
 -export([init/4,
          system_continue/3,
          system_terminate/4,
          system_code_change/4]).
 
--include("hackney.hrl").
 
-start_link(Owner, Ref, Client) ->
-    proc_lib:start_link(?MODULE, init, [self(), Owner, Ref, Client]).
+-define(DEFAULT_KEEPALIVE, 5000).
+-define(DEFAULT_RETRY, 5).
+-define(RETRY_TIMEOUT, 5000).
+-define(RETRY_START, 200). %% we start to retry the connection after 200ms
 
-init(Parent, Owner, Ref, Client) ->
-    %% register the stream
+-ifdef(no_ssl_name_validation).
+-define(VALIDATE_SSL, normal).
+-else.
+-define(VALIDATE_SSL, host).
+-endif.
+
+-record(state, {parent,
+                host,
+                port,
+                insecure,
+                ssl_options,
+                sock,
+                pool,
+                type,
+                keepalive,
+                keepalive_tref,
+                retry,
+                retry_current,
+                retry_timeout,
+                protocol,
+                protocol_opts,
+                protocol_state}).
+
+start_link(Host, Port, Opts) ->
+    proc_lib:start_link(?MODULE, init, [self(), Host, Port, Opts]).
+
+
+init(Parent, Host, Port, Opts) ->
     ok = proc_lib:init_ack(Parent, {ok, self()}),
+    Keepalive = set_keepalive(hackney_util:get_value(keepalive, Opts)),
+    Type = hackney_util:get_value(type, Opts, default_type(Port)),
+    Pool = hackney_util:get_value(pool, Opts, false),
+    Retry = hackney_util:get_value(retry, Opts, ?DEFAULT_RETRY),
+    RetryTimeout = hackney_util:get_value(retry_timeout, Opts, ?RETRY_TIMEOUT),
+    ProtocolOpts = hackney_util:get_value(protocol_opts, Opts, []),
+    Insecure = hackney_util:get_value(insecure, Opts, false),
+    SSLOpts = hackney_util:get_value(ssl_opts, Opts),
+    connect(#state{parent=Parent, host=Host, port=Port, pool=Pool, type=Type,
+                   insecure=Insecure, ssl_options=SSLOpts, keepalive=Keepalive,
+                   retry=Retry, retry_current=?RETRY_START,
+                   retry_timeout=RetryTimeout, protocol_opts=ProtocolOpts}, Retry).
 
-    Parser = hackney_http:parser([response]),
-    try
-        stream_loop(Parent, Owner, Ref, Client#client{parser=Parser,
-                                                      response_state=on_status})
-    catch Class:Reason ->
-        Owner ! {hackney_response, Ref, {error, {unknown_error,
-                                                 {{Class, Reason,
-                                                   erlang:get_stacktrace()},
-                                                  "An unexpected error occurred."}}}}
+
+connect(#state{host=Host, port=Port, pool=Poolname, type=ssl}=State, Retries) ->
+    Transport = hackney_ssl,
+    Opts = [binary, {active, false} | ssl_opts(Host, State)],
+    case connect1(Transport, Host, Port, Opts, Poolname) of
+        {ok, HS} ->
+            Protocol = hackney_http_stream,
+            PState = Protocol:init(Host, HS, State#state.protocol_opts),
+            before_loop(State#state{sock=HS, retry_current=?RETRY_START,
+                                    protocol=Protocol, protocol_state=PState});
+        {error, _} ->
+            retry(State, Retries - 1)
+    end;
+connect(#state{host=Host, port=Port, pool=Poolname}=State, Retries) ->
+    Transport = hackney_tcp,
+    Opts = [binary, {active, false}],
+    case connect1(Transport, Host, Port, Opts, Poolname) of
+        {ok, HS} ->
+            Protocol = hackney_http_stream,
+            PState = Protocol:init(Host, HS, State#state.protocol_opts),
+            before_loop(State#state{sock=HS, retry_current=?RETRY_START,
+                                    protocol=Protocol, protocol_state=PState});
+        {error, _} ->
+            retry(State, Retries - 1)
     end.
 
-stream_loop(Parent, Owner, Ref, #client{transport=Transport,
-                                         socket=Socket,
-                                         response_state=on_body,
-                                         method= <<"HEAD">>,
-                                         parser=Parser}=Client) ->
-    Buffer = hackney_http:get(Parser, buffer),
+before_loop(#state{keepalive=false}=State) ->
+    loop(State);
+before_loop(#state{keepalive=Keepalive}=State) ->
+    TRef = erlang:send_after(Keepalive, self(), keepalive),
+    loop(State#state{keepalive_tref=TRef}).
 
 
-    hackney_manager:store_state(finish_response(Buffer, Client)),
-    %% pass the control of the socket to the manager so we make
-    %% sure a new request will be able to use it
-    Transport:controlling_process(Socket, Parent),
-    %% tell the client we are done
-    Owner ! {hackney_response, Ref, done};
-stream_loop(Parent, Owner, Ref, #client{transport=Transport,
-                                         socket=Socket,
-                                         response_state=on_body,
-                                         clen=0, te=TE,
-                                         parser=Parser}=Client)
-        when TE /= <<"chunked">> ->
-    Buffer = hackney_http:get(Parser, buffer),
-    hackney_manager:store_state(finish_response(Buffer, Client)),
-    %% pass the control of the socket to the manager so we make
-    %% sure a new request will be able to use it
-    Transport:controlling_process(Socket, Parent),
-    %% tell the client we are done
-    Owner ! {hackney_response, Ref, done};
-stream_loop(Parent, Owner, Ref, #client{transport=Transport,
-                                        socket=Socket}=Client) ->
-    case parse(Client) of
-        {loop, Client2} ->
-            stream_loop(Parent, Owner, Ref, Client2);
-        {more, Client2, Rest} ->
-            async_recv(Parent, Owner, Ref, Client2, Rest);
-        {ok, StatusInt, Reason, Client2} ->
-            maybe_redirect(Parent, Owner, Ref, StatusInt, Reason,
-                           Client2);
-        {ok, {headers, Headers}, Client2} ->
-            Owner ! {hackney_response, Ref, {headers, Headers}},
-            maybe_continue(Parent, Owner, Ref, Client2);
-        {ok, Data, Client2} ->
-            Owner ! {hackney_response, Ref, Data},
-            maybe_continue(Parent, Owner, Ref, Client2);
-        done ->
-            %% pass the control of the socket to the manager so we make
-            %% sure a new request will be able to use it
-            Transport:controlling_process(Socket, Parent),
-            Owner ! {hackney_response, Ref, done};
-        {error, _Reason} = Error ->
-            hackney_manager:handle_error(Client),
-            Owner ! {hackney_response, Ref, Error}
-    end.
-
-maybe_continue(Parent, Owner, Ref, #client{transport=Transport,
-                                           socket=Socket,
-                                           async=true}=Client) ->
+retry(_State, 0) ->
+    ok;
+retry(#state{keepalive_tref=TRef}=State, Retries) when is_reference(TRef) ->
+    erlang:cancel_timer(TRef),
     receive
-        {Ref, resume} ->
-            stream_loop(Parent, Owner, Ref, Client);
-        {Ref, pause} ->
-            erlang:hibernate(?MODULE, maybe_continue, [Parent, Owner, Ref,
-                                                       Client]);
-        {Ref, stop_async, From} ->
-            hackney_manager:store_state(Client#client{async=false}),
-            Transport:setopts(Socket, [{active, false}]),
-            Transport:controlling_process(Socket, From),
-            From ! {Ref, ok};
-        {Ref, close} ->
-            hackney_response:close(Client);
-        {system, From, Request} ->
-            sys:handle_system_msg(Request, From, Parent, ?MODULE, [],
-                                  {stream_loop, Parent, Owner, Ref, Client});
-        Else ->
-            error_logger:error_msg("Unexpected message: ~w~n", [Else])
-
+        keepalive -> ok
     after 0 ->
-            stream_loop(Parent, Owner, Ref, Client)
-    end;
-maybe_continue(Parent, Owner, Ref, #client{transport=Transport,
-                                    socket=Socket,
-                                    async=once}=Client) ->
-    receive
-        {Ref, stream_next} ->
-            stream_loop(Parent, Owner, Ref, Client);
-        {Ref, stop_async, From} ->
-            hackney_manager:store_state(Client),
-            Transport:setopts(Socket, [{active, false}]),
-            Transport:controlling_process(Socket, From),
-            From ! {Ref, ok};
-        {Ref, close} ->
-            hackney_response:close(Client);
-        {system, From, Request} ->
-            sys:handle_system_msg(Request, From, Parent, ?MODULE, [],
-                                  {maybe_continue, Parent, Owner, Ref,
-                                   Client});
-        Else ->
-            error_logger:error_msg("Unexpected message: ~w~n", [Else])
-    after 5000 ->
-
-        erlang:hibernate(?MODULE, maybe_continue, [Parent, Owner, Ref,
-                                                   Client])
-
-    end.
-
-
-%% if follow_redirect is true, we are parsing the headers to fetch the
-%% location. If we can still redirect, send a message with the location
-%% to the receiver so he can eventually start a new request.
-%%
-%% redirect messages:
-%% - {redirect, To, Headers}
-%% - {see_other, To, Headers} for status 303 and POST requests.
-maybe_redirect(Parent, Owner, Ref, StatusInt, Reason,
-               #client{transport=Transport,
-                       socket=Socket,
-                       method=Method,
-                       follow_redirect=true}=Client) ->
-    case lists:member(StatusInt, [301, 302, 307]) of
-        true ->
-            Transport:setopts(Socket, [{active, false}]),
-            case parse(Client) of
-                {loop, Client2} ->
-                    maybe_redirect(Parent, Owner, Ref, StatusInt,
-                                   Reason, Client2);
-                {ok, {headers, Headers}, Client2} ->
-                    Location = hackney:redirect_location(Headers),
-                    case {Location, lists:member(Method, [get, head])} of
-                        {undefined, _} ->
-                            Owner ! {hackney_response, Ref,
-                                     {error,invalid_redirection}},
-                            hackney_manager:handle_error(Client2);
-                        {_, _} ->
-                            case hackney_response:skip_body(Client2) of
-                                {skip, Client3} ->
-                                    hackney_manager:store_state(Client3),
-                                    Owner ! {hackney_response, Ref,
-                                             {redirect, Location, Headers}};
-                                Error ->
-                                    Owner ! {hackney_response, Ref, Error},
-                                    hackney_manager:handle_error(Client2)
-                            end
-                    end;
-                {error, Error} ->
-                    hackney_manager:handle_error(Client),
-                    Owner ! {hackney_response, Ref, {error, Error}}
-            end;
-        false when StatusInt =:= 303, Method =:= post ->
-            Transport:setopts(Socket, [{active, false}]),
-            case parse(Client) of
-                {loop, Client2} ->
-                    maybe_redirect(Parent, Owner, Ref, StatusInt,
-                                   Reason, Client2);
-                {ok, {headers, Headers}, Client2} ->
-                    case hackney:redirect_location(Headers) of
-                        undefined ->
-                            Owner ! {hackney_response, Ref,
-                                     {error, invalid_redirection}},
-                            hackney_manager:handle_error(Client2);
-                        Location ->
-                            case hackney_response:skip_body(Client2) of
-                                {skip, Client3} ->
-                                    hackney_manager:store_state(Client3),
-                                    Owner ! {hackney_response, Ref,
-                                             {see_other, Location, Headers}};
-                                Error ->
-                                    Owner ! {hackney_response, Ref, Error},
-                                    hackney_manager:handle_error(Client2)
-                            end
-                    end;
-                {error, Error} ->
-                    hackney_manager:handle_error(Client),
-                    Owner ! {hackney_response, Ref, {error, Error}}
-            end;
-        _ ->
-            Owner ! {hackney_response, Ref, {status, StatusInt, Reason}},
-            maybe_continue(Parent, Owner, Ref, Client)
-    end;
-maybe_redirect(Parent, Owner, Ref, StatusInt, Reason, Client) ->
-    Owner ! {hackney_response, Ref, {status, StatusInt, Reason}},
-    maybe_continue(Parent, Owner, Ref, Client).
-
-
-async_recv(Parent, Owner, Ref,
-           #client{transport=Transport,
-                   socket=Sock,
-                   recv_timeout=Timeout}=Client, Buffer) ->
-
-    {OK, Closed, Error} = Transport:messages(Sock),
-    Transport:setopts(Sock, [{active, once}]),
-    %% some useful info
-    #client{version=Version, clen=CLen, te=TE} = Client,
-    receive
-        {Ref, resume} ->
-            async_recv(Parent, Owner, Ref, Client, Buffer);
-        {Ref, stream_next} ->
-            async_recv(Parent, Owner, Ref, Client, Buffer);
-        {Ref, pause} ->
-            %% make sure that the proces won't be awoken by a tcp msg
-            Transport:setopts(Sock, [{active, false}]),
-            %% hibernate
-            erlang:hibernate(?MODULE, async_recv, [Parent, Owner, Ref,
-                                                   Client, Buffer]);
-        {Ref, close} ->
-            Transport:close(Sock);
-        {Ref, stop_async, From} ->
-            hackney_manager:store_state(Client#client{async=false}),
-            Transport:setopts(Sock, [{active, false}]),
-            Transport:controlling_process(Sock, From),
-            From ! {Ref, ok};
-        {OK, Sock, Data} ->
-            stream_loop(Parent, Owner, Ref, Client#client{buffer=Data});
-        {Closed, Sock} ->
-            case Client#client.response_state of
-                on_body when (Version =:= {1, 0} orelse Version =:= {1, 1})
-                             andalso CLen =:= nil ->
-                    Owner ! {hackney_response, Ref, Buffer};
-                on_body when TE =:= <<"identity">> ->
-                    Owner ! {hackney_response, Ref, Buffer};
-                on_body ->
-                    Owner ! {hackney_response, Ref, {error, {closed, Buffer}}};
-                _ ->
-                    Owner ! {hackney_response, Ref, {error, closed}}
-            end,
-            Transport:close(Sock);
-        {Error, Sock, Reason} ->
-            Owner ! {hackney_response, Ref, {error, Reason}},
-            Transport:close(Sock);
-        {system, From, Request} ->
-            sys:handle_system_msg(Request, From, Parent, ?MODULE, [],
-                                  {async_recv, Parent, Owner, Ref, Client});
-        Else ->
-            error_logger:error_msg("Unexpected message: ~w~n", [Else])
-    after Timeout ->
-            Owner ! {hackney_response, Ref, {error, {closed, timeout}}},
-        Transport:close(Sock)
-    end.
-
-system_continue(_, _, {maybe_continue, Parent, Owner, Ref, Client}) ->
-    maybe_continue(Parent, Owner, Ref, Client);
-system_continue(_, _, {stream_loop, Parent, Owner, Ref, Client}) ->
-    stream_loop(Parent, Owner, Ref, Client);
-system_continue(_, _, {async_recv, Parent, Owner, Ref, Client, Buffer}) ->
-    async_recv(Parent, Owner, Ref, Client, Buffer).
-
--spec system_terminate(any(), _, _, _) -> no_return().
-system_terminate(Reason, _, _, {_, _, _, _Ref, _}) ->
-    exit(Reason).
-
-system_code_change(Misc, _, _, _) ->
-    {ok, Misc}.
-
-
-parse(#client{parser=Parser, buffer=Buffer}=Client) ->
-    Res = hackney_http:execute(Parser, Buffer),
-    process(Res, Client#client{buffer= <<>>}).
-
-process({more, NParser}, Client) ->
-    NClient = update_client(NParser, Client),
-    {more, NClient, <<>>};
-process({more, NParser, Buffer}, Client) ->
-    NClient = update_client(NParser, Client),
-    {more, NClient, Buffer};
-process({response, Version, Status, Reason, Parser}, Client0) ->
-    Client1 = update_client(Parser, Client0#client{version=Version,
-                                                   response_state=on_header}),
-    Client2 = case Status of
-        S when S =:= 204 orelse S =:= 304 ->
-            Client1#client{clen = 0};
-        _Otherwise ->
-            Client1
+              ok
     end,
-    {ok, Status, Reason, Client2};
-process({header, {Key, Value}=KV, NParser},
-        #client{partial_headers=Headers}=Client) ->
-    %% store useful headers
-    Client1 = case hackney_bstr:to_lower(Key) of
-        <<"content-length">> ->
-            CLen = list_to_integer(binary_to_list(Value)),
-            Client#client{clen=CLen};
-        <<"transfer-encoding">> ->
-            Client#client{te=hackney_bstr:to_lower(Value)};
-        <<"connection">> ->
-            Client#client{connection=hackney_bstr:to_lower(Value)};
-        <<"content-type">> ->
-            Client#client{ctype=hackney_bstr:to_lower(Value)};
-        <<"location">> ->
-            Client#client{location=Value};
-        _ ->
-            Client
-    end,
-    NHeaders = [KV | Headers],
-    NClient = update_client(NParser, Client1#client{partial_headers=NHeaders}),
-    {loop, NClient};
-process({headers_complete, NParser},
-        #client{partial_headers=Headers}=Client) ->
-    NClient = update_client(NParser, Client#client{partial_headers=[],
-                                                   response_state=on_body}),
-    {ok, {headers, lists:reverse(Headers)}, NClient};
-process({ok, Data, NParser}, Client) ->
-    NClient = update_client(NParser, Client),
-    {ok, Data, NClient};
-process({done, Rest}, Client) ->
-    Client2 = finish_response(Rest, Client),
-    hackney_manager:store_state(Client2),
-    done;
-process(done, Client) ->
-    Client2 = finish_response(<<>>, Client),
-    hackney_manager:store_state(Client2),
-    done;
-process({error, Reason}, _Client) ->
-    {error, Reason};
-process(Error, _Client) ->
-    {error, Error}.
+    retry(State#state{keepalive_tref=undefined}, Retries);
+retry(State, Retries) ->
+    hackney_util:maybe_seed(),
+    retry_loop(State, Retries).
 
-update_client(Parser, Client) ->
-    Client#client{parser=Parser}.
 
-finish_response(Rest, Client0) ->
-    Client = Client0#client{response_state=done,
-                            body_state=done,
-                            parser=nil,
-                            buffer=Rest,
-                            async=false,
-                            stream_to=false},
-
-    Pool = hackney_connect:is_pool(Client),
-    case hackney_response:maybe_close(Client) of
-        true ->
-            hackney_response:close(Client);
-        false when Pool /= false ->
-            #client{socket=Socket,
-                    socket_ref=Ref,
-                    pool_handler=Handler}=Client,
-            Handler:checkin(Ref, Socket),
-            Client#client{state=closed, socket=nil, socket_ref=nil};
-        false ->
-            Client
+retry_loop(_State, 0) ->
+    error(max_retry);
+retry_loop(#state{parent=Parent, retry_current=Delay, retry_timeout=Max}, Retries) ->
+    NewDelay = hackney_util:rand_increment(Delay, Max),
+    erlang:send_after(Delay, self(), retry),
+    receive
+        retry ->
+            connect(State#state{retry_current=NewDelay}, Retries);
+        {system, _From, Request} ->
+            sys:handle_system_msg(Request, From, Parent, ?MODULE, [],
+                                  {retry_loop, State, Retries})
     end.
+
+
+loop(#state{sock=HS, parent=Parent}=State) ->
+    {Msg, MsgClosed, MsgErr} = hackney_socket:messages(HS),
+    ok.
+
+
+connect1(Transport, Host, Port, Opts, false) ->
+    hackney_socket:connect(Transport, Host, Port, Opts);
+connect1(Transport, Host, Port, Opts, PoolName) ->
+    hackney_sockets_pool:checkout(PoolName, Transport, Host, Port, Opts).
+
+ssl_opts(Host, #state{insecure=Insecure, ssl_options=undefined}) ->
+    case {Insecure, should_validate_ssl()} of
+        {true, _} ->
+            [{verify, verify_none}, {reuse_session, true}];
+        {_, host} ->
+            [{verify_fun, {fun ssl_verify_hostname:verify_fun/3,
+                           [{check_hostname, Host}]}},
+             {cacertfile, cacertfile()},
+             {server_name_indication, Host},
+             {verify, verify_peer},
+             {depth, 99}];
+        {_, normal} ->
+            [{cacertfile, cacertfile()},
+             {verify, verify_peer},
+             {depth, 99}]
+    end;
+ssl_opts(_, #state{ssl_options=SSLOpts}) ->
+    SSLOpts.
+
+set_keepalive(true) -> ?DEFAULT_KEEPALIVE;
+set_keepalive(T) when is_integer(T) -> T;
+set_keepalive(_) ->false.
+
+default_type(80) -> tcp;
+default_type(_) -> ssl.
+
+should_validate_ssl() ->
+    ?VALIDATE_SSL.
+
+cacertfile() ->
+    filename:join(hackney_util:privdir(), "ca-bundle.crt").

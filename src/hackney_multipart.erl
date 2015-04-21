@@ -240,7 +240,8 @@ mp_file_header({file, Path, {Disposition, Params}, ExtraHeaders}, Boundary) ->
     {BinHeader, Len}.
 
 %% @doc return the multipart header for a data
--spec mp_data_header({Name:: binary(), DataLen :: integer()} |
+-spec mp_data_header({Name::binary(), ExtraHeaders :: [{binary(), binary()}]} |
+                     {Name:: binary(), DataLen :: integer()} |
                      {Name:: binary(), DataLen :: integer(),
                       ExtraHeaders ::[{binary(), binary()}]} |
                      {Name:: binary(), DataLen :: integer(),
@@ -248,7 +249,15 @@ mp_file_header({file, Path, {Disposition, Params}, ExtraHeaders}, Boundary) ->
                             ExtraHeaders :: [{binary(), binary()}]},
                      Boundary :: binary()) ->
     {binary(), DataLen :: integer()}.
-mp_data_header({Name, Len}, Boundary) ->
+mp_data_header({Name, ExtraHeaders}, Boundary) when is_list(ExtraHeaders) ->
+    %% part without content-length
+    CType = hackney_mimetypes:filename(Name),
+    Headers = [{<<"Content-Disposition">>,
+                {<<"form-data">>, [{<<"name">>, <<"\"", Name/binary, "\"">>}]}
+               },
+               {<<"Content-Type">>, CType}],
+    hackney_multipart:mp_header(Headers, Boundary);
+mp_data_header({Name, Len}, Boundary) when is_integer(Len) ->
     mp_data_header({Name, Len, []}, Boundary);
 mp_data_header({Name, Len, ExtraHeaders}, Boundary) ->
     Disposition = {<<"form-data">>, [{<<"name">>,

@@ -129,8 +129,6 @@ to_binary(Headers) when is_list(Headers) ->
             <<"\r\n\r\n">>]);
 to_binary(Headers) ->
     to_binary(to_list(Headers)).
-
-%% @doc Create a binary header
 make_header(Name, Value) ->
     Value1 = hackney_bstr:to_binary(Value),
     << Name/binary, ": ", Value1/binary >>.

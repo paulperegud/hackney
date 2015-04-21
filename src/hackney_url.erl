@@ -23,6 +23,7 @@
          pathencode/1,
          normalize/1]).
 
+-include("hackney.hrl").
 -include("hackney_lib.hrl").
 
 -type qs_vals() :: [{binary(), binary() | true}].
@@ -40,7 +41,7 @@ parse_url(<<"http://", Rest/binary>>) ->
     parse_url(Rest, #hackney_url{transport=hackney_tcp,
                                          scheme=http});
 parse_url(<<"https://", Rest/binary>>) ->
-    parse_url(Rest, #hackney_url{transport=hackney_ssl,
+    parse_url(Rest, #hackney_url{transport=?TRANSPORT_SSL
                                  scheme=https});
 parse_url(URL) ->
     parse_url(URL, #hackney_url{transport=hackney_tcp,

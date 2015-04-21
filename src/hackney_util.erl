@@ -18,6 +18,7 @@
 -export([increment/1, increment/2]).
 -export([rand_increment/1, rand_increment/2]).
 -export([maybe_seed/0]).
+-export([get_value/2, get_value/3]).
 
 
 -include("hackney.hrl").
@@ -174,7 +175,7 @@ check_server_option(_) ->
     true.
 
 get_app_env(Key, Default) ->
-    case application:get_env(Key) of
+    case application:get_env(hackney, Key) of
         undefined       -> Default;
         {ok, undefined} -> Default;
         {ok, Value}     -> Value
@@ -209,4 +210,18 @@ maybe_seed() ->
         undefined -> random:seed(erlang:now());
         {X,X,X} -> random:seed(erlang:now());
         _ -> ok
+    end.
+
+%% @doc faster alternative to prolists:get_value/2
+-spec get_value(any(), list()) -> any().
+get_value(Key, Opts) ->
+    get_value(Key, Opts, undefined).
+
+%% @doc faster alternative to prolists:get_value/3
+%% Instead of browsing all the list to match the key we rely on the lists bif
+-spec get_value(any(), list(), any()) -> any().
+get_value(Key, Opts, Default) ->
+    case lists:keyfind(Key, 1, Opts) of
+        {value, Val} -> Val;
+        _ -> Default
     end.

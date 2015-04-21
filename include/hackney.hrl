@@ -39,3 +39,18 @@
         method = nil,
         path,
         ctype = nil}).
+
+-define(SSL_TRANSPORT, hackney_ssl).
+
+-record(hrequest, {ref,
+                   sock,
+                   method,
+                   reqtype,
+                   status=request,
+                   expect,
+                   boundary,
+                   send_fun,
+                   rstatus,
+                   rreason,
+                   rversion,
+                   rheaders}).
