@@ -337,9 +337,11 @@ process({header, {Key, Value}=KV, NParser},
     {loop, NClient};
 process({headers_complete, NParser},
         #client{partial_headers=Headers}=Client) ->
+    RevHeaders = lists:reverse(Headers),
     NClient = update_client(NParser, Client#client{partial_headers=[],
+                                                   respose_headers=RevHeaders,
                                                    response_state=on_body}),
-    {ok, {headers, lists:reverse(Headers)}, NClient};
+    {ok, {headers, RevHeaders}, NClient};
 process({ok, Data, NParser}, Client) ->
     NClient = update_client(NParser, Client),
     {ok, Data, NClient};

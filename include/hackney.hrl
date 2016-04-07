@@ -36,6 +36,7 @@
         req_chunk_size=4096,
         buffer = <<>>,
         partial_headers = [],
+        response_headers = [],
         version,
         clen = nil,
         te = nil,

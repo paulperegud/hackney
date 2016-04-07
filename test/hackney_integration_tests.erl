@@ -9,6 +9,7 @@ http_requests_test_() ->
      fun(ok) ->
          {inparallel, [get_request(),
                        request_with_body(),
+                       request_with_body_gzip(),
                        head_request(),
                        no_content_response(),
                        not_modified_response(),
@@ -41,6 +42,17 @@ request_with_body() ->
     ExpectedBody = <<"User-agent: *\nDisallow: /deny\n">>,
     {ok, 200, _, Body} = hackney:request(get, URL, [], <<>>, [{with_body, true}]),
     ?_assertEqual(ExpectedBody, Body).
+
+request_with_body_gzip() ->
+    URL = <<"http://localhost:8000/gzip">>,
+    ReqHeaders = [{<<"Accept-Encoding">>, <<"gzip">>}],
+    EB = <<"{\n  \"gzipped\": true, \n  \"headers\": {\n    \"Accept-Encoding\": \"gzip\", \n    \"Host\": \"localhost:8000\", \n    \"User-Agent\": \"hackney/1.6.0\"\n  }, \n  \"method\": \"GET\", \n  \"origin\": \"127.0.0.1\"\n}\n">>,
+    {ok, 200, Headers, Body} = hackney:request(get, URL, ReqHeaders, <<>>, [{with_body, true}]),
+    io:format("~nHeaders: ~p~n", [Headers]),
+    io:format("Body: ~p~n", [zlib:gunzip(Body)]),
+    io:format("Expe: ~p~n", [EB]),
+    ?_assertEqual(<<"gzip">>, proplists:get_value(<<"Content-Encoding">>, Headers)),
+    ?_assertEqual(EB, Body).
 
 head_request() ->
     URL = <<"http://localhost:8000/get">>,

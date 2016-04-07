@@ -319,6 +319,12 @@ read_body(_MaxLength, Client, Acc) ->
     Client2 = end_stream_body(<<>>, Client),
     {ok, Acc, Client2}.
 
+maybe_deflate(Headers, Body) ->
+    case proplists:get_value(<<"Content-Encoding">>, Headers) of
+        <<"gzip">> -> zlib:gunzip(Body);
+        <<"deflate">> -> zlib:unzip(Body);
+        _ -> Body
+    end.
 
 maybe_close(#client{socket=nil}) ->
     true;
